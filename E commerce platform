@@ -1,0 +1,314 @@
+1. Folder Structure
+
+ecommerce-platform/
+│── backend/
+│   ├── server.js
+│   ├── package.json
+│   ├── .env.example
+│   └── src/
+│       ├── config/db.js
+│       ├── models/User.js
+│       ├── models/Product.js
+│       └── routes/
+│           ├── auth.routes.js
+│           ├── product.routes.js
+│           └── checkout.routes.js
+│
+│── frontend/
+│   ├── index.html
+│   ├── package.json
+│   ├── .env.example
+│   └── src/
+│       ├── main.jsx
+│       └── App.jsx
+
+
+---
+
+2. Backend Files
+
+backend/package.json
+
+{
+  "name": "ecommerce-backend",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.3.1",
+    "morgan": "^1.10.0",
+    "stripe": "^14.0.0"
+  }
+}
+
+backend/.env.example
+
+MONGO_URI=mongodb://localhost:27017/ecommerce_dev
+JWT_SECRET=change_me
+PORT=5001
+STRIPE_SECRET_KEY=sk_test_yourkey
+
+backend/server.js
+
+import express from 'express';
+import cors from 'cors';
+import morgan from 'morgan';
+import dotenv from 'dotenv';
+import { connectDB } from './src/config/db.js';
+import authRoutes from './src/routes/auth.routes.js';
+import productRoutes from './src/routes/product.routes.js';
+import checkoutRoutes from './src/routes/checkout.routes.js';
+
+dotenv.config();
+const app = express();
+
+app.use(cors());
+app.use(express.json());
+app.use(morgan('dev'));
+
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'ecommerce-backend' }));
+
+app.use('/api/auth', authRoutes);
+app.use('/api/products', productRoutes);
+app.use('/api/checkout', checkoutRoutes);
+
+const PORT = process.env.PORT || 5001;
+
+connectDB().then(() => {
+  app.listen(PORT, () => console.log(E-commerce API running on port ${PORT}));
+}).catch(err => {
+  console.error('DB connection failed:', err);
+  process.exit(1);
+});
+
+backend/src/config/db.js
+
+import mongoose from 'mongoose';
+
+export async function connectDB() {
+  const uri = process.env.MONGO_URI || 'mongodb://localhost:27017/ecommerce_dev';
+  mongoose.set('strictQuery', true);
+  await mongoose.connect(uri);
+  console.log('MongoDB connected');
+}
+
+backend/src/models/User.js
+
+import mongoose from 'mongoose';
+
+const userSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  email: { type: String, unique: true, required: true },
+  passwordHash: { type: String, required: true },
+  role: { type: String, enum: ['user', 'admin'], default: 'user' }
+}, { timestamps: true });
+
+export default mongoose.model('User', userSchema);
+
+backend/src/models/Product.js
+
+import mongoose from 'mongoose';
+
+const productSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  description: String,
+  price: { type: Number, required: true },
+  imageUrl: String,
+  category: String,
+  stock: { type: Number, default: 0 }
+}, { timestamps: true });
+
+export default mongoose.model('Product', productSchema);
+
+backend/src/routes/auth.routes.js
+
+import { Router } from 'express';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import User from '../models/User.js';
+
+const router = Router();
+
+router.post('/register', async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+    const exists = await User.findOne({ email });
+    if (exists) return res.status(409).json({ message: 'Email already registered' });
+    const passwordHash = await bcrypt.hash(password, 10);
+    const user = await User.create({ name, email, passwordHash });
+    res.status(201).json({ id: user._id, email: user.email });
+  } catch (e) {
+    res.status(500).json({ message: e.message });
+  }
+});
+
+router.post('/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const user = await User.findOne({ email });
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    const ok = await bcrypt.compare(password, user.passwordHash);
+    if (!ok) return res.status(401).json({ message: 'Invalid credentials' });
+    const token = jwt.sign({ sub: user._id, role: user.role }, process.env.JWT_SECRET || 'dev', { expiresIn: '7d' });
+    res.json({ token, user: { id: user._id, name: user.name, email: user.email } });
+  } catch (e) {
+    res.status(500).json({ message: e.message });
+  }
+});
+
+export default router;
+
+backend/src/routes/product.routes.js
+
+import { Router } from 'express';
+import Product from '../models/Product.js';
+
+const router = Router();
+
+// Seed some demo products (dev only)
+router.post('/seed', async (req, res) => {
+  const demo = [
+    { name: 'T-shirt', description: 'Soft cotton tee', price: 19.99, stock: 100 },
+    { name: 'Hoodie', description: 'Cozy hoodie', price: 39.99, stock: 50 },
+    { name: 'Cap', description: 'Stylish cap', price: 14.99, stock: 75 }
+  ];
+  await Product.deleteMany({});
+  const docs = await Product.insertMany(demo);
+  res.json(docs);
+});
+
+// List with basic search & filter
+router.get('/', async (req, res) => {
+  const { q, min, max, category } = req.query;
+  const filter = {};
+  if (q) filter.name = { $regex: q, $options: 'i' };
+  if (category) filter.category = category;
+  if (min || max) filter.price = { ...(min ? { $gte: Number(min) } : {}), ...(max ? { $lte: Number(max) } : {}) };
+  const items = await Product.find(filter).sort({ createdAt: -1 }).limit(100);
+  res.json(items);
+});
+
+export default router;
+
+backend/src/routes/checkout.routes.js
+
+import { Router } from 'express';
+import Stripe from 'stripe';
+const router = Router();
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder');
+
+router.post('/create-intent', async (req, res) => {
+  const { amount } = req.body; // cents
+  try {
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: Number(amount) || 100,
+      currency: 'usd'
+    });
+    res.json({ clientSecret: paymentIntent.client_secret });
+  } catch (e) {
+    res.status(500).json({ message: e.message });
+  }
+});
+
+export default router;
+
+
+---
+
+3. Frontend Files
+
+frontend/package.json
+
+{
+  "name": "ecommerce-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "vite": "^5.2.0"
+  }
+}
+
+frontend/.env.example
+
+VITE_API_URL=http://localhost:5001
+
+frontend/index.html
+
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>E-Commerce Starter</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
+
+frontend/src/main.jsx
+
+import React from 'react'
+import { createRoot } from 'react-dom/client'
+import App from './App.jsx'
+
+createRoot(document.getElementById('root')).render(<App />)
+
+frontend/src/App.jsx
+
+import React, { useEffect, useState } from 'react'
+
+const API = import.meta.env.VITE_API_URL || 'http://localhost:5001';
+
+export default function App() {
+  const [products, setProducts] = useState([]);
+  const [q, setQ] = useState('');
+
+  useEffect(() => {
+    fetch(${API}/api/products)
+      .then(r => r.json()).then(setProducts)
+      .catch(console.error);
+  }, []);
+
+  const search = async () => {
+    const r = await fetch(${API}/api/products?q=${encodeURIComponent(q)});
+    setProducts(await r.json());
+  };
+
+  return (
+    <div style={{ maxWidth: 900, margin: '2rem auto', fontFamily: 'system-ui' }}>
+      <h1>E-Commerce Starter</h1>
+      <div style={{ display:'flex', gap:8 }}>
+        <input placeholder="Search products..." value={q} onChange={e=>setQ(e.target.value)} />
+        <button onClick={search}>Search</button>
+      </div>
+      <ul>
+        {products.map(p => (
+          <li key={p._id} style={{ padding:'8px 0', borderBottom:'1px solid #ddd' }}>
+            <strong>{p.name}</strong> — ${p.price?.toFixed(2)}
+            <div style={{ fontSize:12, color:'#555' }}>{p.description}</div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
